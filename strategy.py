@@ -12,6 +12,7 @@ class StrategyConfig:
     pivot_right: int = 3
     sweep_recent_bars: int = 5
     rr_multiple: float = 2.0
+    require_displacement: bool = True
 
 
 class MarketStructureStrategy:
@@ -154,16 +155,22 @@ class MarketStructureStrategy:
         out = df.copy()
         if "atr" not in out.columns:
             out = self.atr(out)
+
         out["body_size"] = (out["close"] - out["open"]).abs()
         out["displacement"] = out["body_size"] > out["atr"]
+        # Directional displacement so setup quality can require momentum alignment.
+        out["bullish_displacement"] = out["displacement"] & (out["close"] > out["open"])
+        out["bearish_displacement"] = out["displacement"] & (out["close"] < out["open"])
         return out
 
     def detect_fvg(self, df: pd.DataFrame) -> pd.DataFrame:
         out = df.copy()
         out["bullish_fvg"] = False
         out["bearish_fvg"] = False
-        out["fvg_top"] = np.nan
-        out["fvg_bottom"] = np.nan
+        out["bullish_fvg_top"] = np.nan
+        out["bullish_fvg_bottom"] = np.nan
+        out["bearish_fvg_top"] = np.nan
+        out["bearish_fvg_bottom"] = np.nan
 
         for i in range(2, len(out)):
             idx = out.index[i]
@@ -174,13 +181,13 @@ class MarketStructureStrategy:
 
             if low_i > high_im2:
                 out.at[idx, "bullish_fvg"] = True
-                out.at[idx, "fvg_bottom"] = high_im2
-                out.at[idx, "fvg_top"] = low_i
+                out.at[idx, "bullish_fvg_bottom"] = high_im2
+                out.at[idx, "bullish_fvg_top"] = low_i
 
             if high_i < low_im2:
                 out.at[idx, "bearish_fvg"] = True
-                out.at[idx, "fvg_bottom"] = high_i
-                out.at[idx, "fvg_top"] = low_im2
+                out.at[idx, "bearish_fvg_bottom"] = high_i
+                out.at[idx, "bearish_fvg_top"] = low_im2
 
         return out
 
@@ -194,15 +201,30 @@ class MarketStructureStrategy:
             idx = out.index[i]
             row = out.iloc[i]
 
-            if bool(row.get("choch_up", False)) and bool(row.get("recent_sweep_low", False)) and bool(
-                row.get("bullish_fvg", False)
-            ):
-                fvg_bottom = float(row["fvg_bottom"])
-                fvg_top = float(row["fvg_top"])
+            long_conditions = [
+                bool(row.get("choch_up", False)),
+                bool(row.get("recent_sweep_low", False)),
+                bool(row.get("bullish_fvg", False)),
+            ]
+            short_conditions = [
+                bool(row.get("choch_down", False)),
+                bool(row.get("recent_sweep_high", False)),
+                bool(row.get("bearish_fvg", False)),
+            ]
+
+            if self.config.require_displacement:
+                long_conditions.append(bool(row.get("bullish_displacement", False)))
+                short_conditions.append(bool(row.get("bearish_displacement", False)))
+
+            if all(long_conditions):
+                fvg_bottom = float(row["bullish_fvg_bottom"])
+                fvg_top = float(row["bullish_fvg_top"])
                 entry = (fvg_top + fvg_bottom) / 2.0
                 stop = fvg_bottom
                 risk = entry - stop
-                if risk > 0:
+
+                # Skip invalid trade geometries.
+                if risk > 0 and entry != stop:
                     target = entry + self.config.rr_multiple * risk
                     setups.append(
                         {
@@ -215,15 +237,15 @@ class MarketStructureStrategy:
                     )
                     out.at[idx, "setup_long"] = True
 
-            if bool(row.get("choch_down", False)) and bool(row.get("recent_sweep_high", False)) and bool(
-                row.get("bearish_fvg", False)
-            ):
-                fvg_bottom = float(row["fvg_bottom"])
-                fvg_top = float(row["fvg_top"])
+            if all(short_conditions):
+                fvg_bottom = float(row["bearish_fvg_bottom"])
+                fvg_top = float(row["bearish_fvg_top"])
                 entry = (fvg_top + fvg_bottom) / 2.0
                 stop = fvg_top
                 risk = stop - entry
-                if risk > 0:
+
+                # Skip invalid trade geometries.
+                if risk > 0 and entry != stop:
                     target = entry - self.config.rr_multiple * risk
                     setups.append(
                         {
